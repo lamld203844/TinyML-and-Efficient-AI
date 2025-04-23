@@ -45,6 +45,50 @@ def get_quantization_scale_for_weight(weight, bitwidth):
     _, quantized_max = get_quantized_range(bitwidth)
     return fp_max / quantized_max
 
+def get_quantized_range(bitwidth):
+    quantized_max = (1 << (bitwidth - 1)) - 1
+    quantized_min = -(1 << (bitwidth - 1))
+    return quantized_min, quantized_max
+
+def linear_quantize(fp_tensor, bitwidth, scale, zero_point, dtype=torch.int8) -> torch.Tensor:
+    """
+    linear quantization for single fp_tensor
+      from
+        fp_tensor = (quantized_tensor - zero_point) * scale
+      we have,
+        quantized_tensor = int(round(fp_tensor / scale)) + zero_point
+    :param tensor: [torch.(cuda.)FloatTensor] floating tensor to be quantized
+    :param bitwidth: [int] quantization bit width
+    :param scale: [torch.(cuda.)FloatTensor] scaling factor
+    :param zero_point: [torch.(cuda.)IntTensor] the desired centroid of tensor values
+    :return:
+        [torch.(cuda.)FloatTensor] quantized tensor whose values are integers
+    """
+    assert(fp_tensor.dtype == torch.float)
+    assert(isinstance(scale, float) or
+            (scale.dtype == torch.float and scale.dim() == fp_tensor.dim()))
+    assert(isinstance(zero_point, int) or
+            (zero_point.dtype == dtype and zero_point.dim() == fp_tensor.dim()))
+
+    ############### YOUR CODE STARTS HERE ###############
+    # Step 1: scale the fp_tensor
+    scaled_tensor = fp_tensor / scale
+    # Step 2: round the floating value to integer value
+    rounded_tensor = torch.round(scaled_tensor)
+    ############### YOUR CODE ENDS HERE #################
+
+    rounded_tensor = rounded_tensor.to(dtype)
+
+    ############### YOUR CODE STARTS HERE ###############
+    # Step 3: shift the rounded_tensor to make zero_point 0
+    shifted_tensor = rounded_tensor + zero_point
+    ############### YOUR CODE ENDS HERE #################
+
+    # Step 4: clamp the shifted_tensor to lie in bitwidth-bit range
+    quantized_min, quantized_max = get_quantized_range(bitwidth)
+    quantized_tensor = shifted_tensor.clamp_(quantized_min, quantized_max)
+    return quantized_tensor
+
 def linear_quantize_weight_per_channel(tensor, bitwidth):
     """
     linear quantization for weight tensor
@@ -68,6 +112,68 @@ def linear_quantize_weight_per_channel(tensor, bitwidth):
     scale = scale.view(scale_shape)
     quantized_tensor = linear_quantize(tensor, bitwidth, scale, zero_point=0)
     return quantized_tensor, scale, 0
+
+
+# ---------------------------- FORMULA -----------------------------------
+def quantized_conv2d(input, weight, bias, feature_bitwidth, weight_bitwidth,
+                     input_zero_point, output_zero_point,
+                     input_scale, weight_scale, output_scale,
+                     stride, padding, dilation, groups):
+    """
+    quantized 2d convolution
+    :param input: [torch.CharTensor] quantized input (torch.int8)
+    :param weight: [torch.CharTensor] quantized weight (torch.int8)
+    :param bias: [torch.IntTensor] shifted quantized bias or None (torch.int32)
+    :param feature_bitwidth: [int] quantization bit width of input and output
+    :param weight_bitwidth: [int] quantization bit width of weight
+    :param input_zero_point: [int] input zero point
+    :param output_zero_point: [int] output zero point
+    :param input_scale: [float] input feature scale
+    :param weight_scale: [torch.FloatTensor] weight per-channel scale
+    :param output_scale: [float] output feature scale
+    :return:
+        [torch.(cuda.)CharTensor] quantized output feature
+    """
+    assert(len(padding) == 4)
+    assert(input.dtype == torch.int8)
+    assert(weight.dtype == input.dtype)
+    assert(bias is None or bias.dtype == torch.int32)
+    assert(isinstance(input_zero_point, int))
+    assert(isinstance(output_zero_point, int))
+    assert(isinstance(input_scale, float))
+    assert(isinstance(output_scale, float))
+    assert(weight_scale.dtype == torch.float)
+
+    # Step 1: calculate integer-based 2d convolution (8-bit multiplication with 32-bit accumulation)
+    input = torch.nn.functional.pad(input, padding, 'constant', input_zero_point)
+    if 'cpu' in input.device.type:
+        # use 32-b MAC for simplicity
+        output = torch.nn.functional.conv2d(input.to(torch.int32), weight.to(torch.int32), None, stride, 0, dilation, groups)
+    else:
+        # current version pytorch does not yet support integer-based conv2d() on GPUs
+        output = torch.nn.functional.conv2d(input.float(), weight.float(), None, stride, 0, dilation, groups)
+        output = output.round().to(torch.int32)
+    if bias is not None:
+        output = output + bias.view(1, -1, 1, 1)
+
+    ############### YOUR CODE STARTS HERE ###############
+    # hint: this code block should be the very similar to quantized_linear()
+
+    # Step 2: scale the output
+    #         hint: 1. scales are floating numbers, we need to convert output to float as well
+    #               2. the shape of weight scale is [oc, 1, 1, 1] while the shape of output is [batch_size, oc, height, width]
+    output = output.float()
+    output = output * input_scale * weight_scale.flatten().view(1, -1, 1, 1) / output_scale
+
+    # Step 3: shift output by output_zero_point
+    #         hint: one line of code
+    output += output_zero_point
+    ############### YOUR CODE ENDS HERE #################
+
+    # Make sure all value lies in the bitwidth-bit range
+    output = output.round().clamp(*get_quantized_range(feature_bitwidth)).to(torch.int8)
+    return output
+
 
 class QuantizedConv2d(nn.Module):
     def __init__(self, weight, bias,
