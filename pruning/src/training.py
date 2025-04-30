@@ -1,5 +1,5 @@
 """Training loops, loss functions, optimizers"""
-import tqdm
+from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
@@ -20,7 +20,7 @@ def train(
     """
 
     model.train()
-    
+    model.to(device)
     for inputs, targets in tqdm(dataflow, desc='train', leave=False):
         # move from CPU to GPU
         inputs, targets = inputs.to(device), targets.to(device)
