@@ -95,3 +95,7 @@ for epoch in range(num_finetune_epochs):
         best_sparse_model_checkpoint['state_dict'] = copy.deepcopy(model.state_dict())
         best_accuracy = accuracy
     print(f'    Epoch {epoch+1} Accuracy {accuracy:.2f}% / Best Accuracy: {best_accuracy:.2f}%')
+
+
+# ------------------- 4. others evaluation metrics -----------------------
+
